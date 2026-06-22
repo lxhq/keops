@@ -24,10 +24,10 @@ tree pruning, FFT/binning, approximate KDE, or normalized density output.
 | --- | --- |
 | `keops_exact_kde.py` | Helper for one exact KeOps SVM or KDV workload. |
 | `run_keops_local_3080ti.py` | Local RTX 3080 Ti Stage 0 runner. |
-| `run_keops_remote_tbd.py` | Remote placeholder runner. |
+| `run_keops_remote_h100.py` | Remote H100 Stage 0 runner. |
 
-A future remote machine should fill in `run_keops_remote_tbd.py` with only the
-machine-specific paths and environment defaults.
+The remote H100 runner mirrors the local runner output schema and writes
+temporary evidence first. Accepted summaries are promoted manually after review.
 
 ## Kernel Scale
 
@@ -79,6 +79,23 @@ reported by the Python runner is query evaluation time only; file loading,
 coordinate scaling, query construction, and result writing are outside the timed
 region. The default warmup also keeps first-call PyKeOps JIT compilation outside
 the timed region. Persistent promotion is manual after review.
+
+## Remote H100 Suite
+
+Run on the remote H100 machine:
+
+```bash
+python3 /home/lxheq/Documents/workspace/GPU-accelerated_Kernel_Density_Exact/baselines/keops/scripts/run_keops_remote_h100.py
+```
+
+Default remote paths:
+
+| Item | Path |
+| --- | --- |
+| Dataset root | `/home/lxheq/Documents/workspace/dataset/GPU-accelerated_Kernel_Density_Computation/` |
+| Temporary result root | `/home/lxheq/Documents/workspace/GPU-accelerated_Kernel_Density_Exact/tmp-results/stage0/keops/` |
+| Basic-Scan reference root | `/home/lxheq/Documents/workspace/dataset/GPU-accelerated_Kernel_Density_Computation/exact/experiments/stage0/local-3080ti/basic/basic-scan-ground-truth/` |
+| CUDA toolkit | `/usr/local/cuda-12.4/` |
 
 ## Five Workloads
 
