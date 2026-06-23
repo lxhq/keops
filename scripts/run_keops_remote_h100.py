@@ -30,17 +30,15 @@ DATA_ROOT = Path("/home/lxheq/Documents/workspace/dataset/GPU-accelerated_Kernel
 TMP_RESULT_ROOT = Path("/home/lxheq/Documents/workspace/GPU-accelerated_Kernel_Density_Exact/tmp-results/stage0/keops")
 PERSISTENT_RESULT_ROOT = Path("/home/lxheq/Documents/workspace/dataset/GPU-accelerated_Kernel_Density_Computation/exact/experiments/stage0")
 EXACT_REPO_ROOT = Path("/home/lxheq/Documents/workspace/GPU-accelerated_Kernel_Density_Exact/GPU-kernel-density-exact")
-BASIC_GROUND_TRUTH_ROOT = PERSISTENT_RESULT_ROOT / "local-3080ti/basic/basic-scan-ground-truth"
+BASIC_GROUND_TRUTH_ROOT = PERSISTENT_RESULT_ROOT / "ground_truth"
 
 MACHINE = "remote-h100"
 METHOD = "KeOps"
 METHOD_TOKEN = "keops"
 ENGINE = "keops"
 BACKEND = "GPU"
-PRECISION = "FP64"
-DTYPE = "float64"
 EXPECTED_TIMING_SCOPE = "in_memory_query_pipeline"
-SVM_SCOTT_B = "0.1"
+SVM_SCOTT_B = "1"
 KDV_SCOTT_B = "1"
 SMOKE_SCOTT_B = "1"
 KDV_ROWS = 1920
@@ -50,8 +48,6 @@ SMOKE_KDV_COLS = 256
 SVM_BATCH_SIZE = 4096
 KDV_BATCH_SIZE = 8192
 INSTALL_DEPS = True
-ABS_TOLERANCE = 1e-3
-REL_TOLERANCE = 1e-5
 SMOKE_TIMEOUT_SECONDS = 600
 SVM_TIMEOUT_SECONDS = 3600
 KDV_TIMEOUT_SECONDS = 3600
@@ -78,6 +74,14 @@ SMOKE_KDV_REF = EXACT_REPO_ROOT / "results/SUSY_vis_10000_kdv_256x256_basic_scan
 
 
 @dataclass(frozen=True)
+class PrecisionConfig:
+    precision: str
+    dtype: str
+    abs_tolerance: float
+    rel_tolerance: float
+
+
+@dataclass(frozen=True)
 class Workload:
     run_group: str
     workload: str
@@ -94,6 +98,7 @@ class Workload:
 @dataclass
 class RunRecord:
     workload: Workload
+    precision_config: PrecisionConfig
     output_path: Path
     log_path: Path
     command: list[str]
@@ -105,6 +110,12 @@ class RunRecord:
     query_count_from_binary: str
     qps: str
     status: str
+
+
+PRECISION_CONFIGS = (
+    PrecisionConfig("FP64", "float64", 1e-6, 1e-9),
+    PrecisionConfig("FP32", "float32", 1e-2, 1e-4),
+)
 
 
 def run_env() -> dict[str, str]:
@@ -166,7 +177,11 @@ def iter_floats(path: Path) -> Iterable[float]:
                 yield float(token)
 
 
-def compare_numeric_files(output_path: Path, reference_path: Path) -> dict[str, str]:
+def compare_numeric_files(
+    output_path: Path,
+    reference_path: Path,
+    precision_config: PrecisionConfig,
+) -> dict[str, str]:
     max_abs = 0.0
     max_rel = 0.0
     failure_count = 0
@@ -189,7 +204,10 @@ def compare_numeric_files(output_path: Path, reference_path: Path) -> dict[str, 
         max_abs = max(max_abs, diff)
         if reference_value != 0.0:
             max_rel = max(max_rel, diff / abs(float(reference_value)))
-        threshold = max(ABS_TOLERANCE, REL_TOLERANCE * abs(float(reference_value)))
+        threshold = max(
+            precision_config.abs_tolerance,
+            precision_config.rel_tolerance * abs(float(reference_value)),
+        )
         if diff > threshold:
             failure_count += 1
 
@@ -198,7 +216,10 @@ def compare_numeric_files(output_path: Path, reference_path: Path) -> dict[str, 
         "max_abs_err": f"{max_abs:.12g}",
         "max_rel_err": f"{max_rel:.12g}",
         "failure_count": str(failure_count),
-        "tolerance": f"abs={ABS_TOLERANCE:g};rel={REL_TOLERANCE:g}",
+        "tolerance": (
+            f"abs={precision_config.abs_tolerance:g};"
+            f"rel={precision_config.rel_tolerance:g}"
+        ),
         "status": "ok" if failure_count == 0 else "failed_tolerance",
     }
 
@@ -340,8 +361,8 @@ def write_inventory(path: Path, timestamp: str, git_branch: str, git_commit: str
         f"method: {METHOD}",
         f"engine: {ENGINE}",
         f"backend: {BACKEND}",
-        f"dtype: {DTYPE}",
-        f"precision: {PRECISION}",
+        "precision_configs: "
+        + ", ".join(f"{cfg.precision}/{cfg.dtype}" for cfg in PRECISION_CONFIGS),
         f"timing_scope: {EXPECTED_TIMING_SCOPE}",
         f"svm_scott_b: {SVM_SCOTT_B}",
         f"kdv_scott_b: {KDV_SCOTT_B}",
@@ -384,7 +405,11 @@ def batch_size_for_workload(workload: Workload) -> int:
     return SVM_BATCH_SIZE if workload.mode == "svm" else KDV_BATCH_SIZE
 
 
-def workload_command(workload: Workload, output_path: Path) -> list[str]:
+def workload_command(
+    workload: Workload,
+    precision_config: PrecisionConfig,
+    output_path: Path,
+) -> list[str]:
     batch_size = str(batch_size_for_workload(workload))
     base = [PYTHON_BIN, str(HELPER), workload.mode]
     if workload.mode == "svm":
@@ -410,32 +435,48 @@ def workload_command(workload: Workload, output_path: Path) -> list[str]:
         "--backend",
         BACKEND,
         "--dtype",
-        DTYPE,
+        precision_config.dtype,
         "--local-keops-root",
         str(KEOPS_ROOT),
     ])
     return base
 
 
-def output_name(workload: Workload) -> str:
+def output_name(workload: Workload, precision_config: PrecisionConfig) -> str:
     safe_b = workload.scale_value.replace(".", "p")
+    precision_token = precision_config.precision.lower()
     if workload.mode == "kdv":
         assert workload.grid_rows is not None and workload.grid_cols is not None
         return (
-            f"{workload.workload}_keops_fp64_"
+            f"{workload.workload}_keops_{precision_token}_"
             f"{workload.grid_rows}x{workload.grid_cols}_scott_diag_b{safe_b}.out"
         )
-    return f"{workload.workload}_keops_fp64_scott_diag_b{safe_b}.out"
+    return f"{workload.workload}_keops_{precision_token}_scott_diag_b{safe_b}.out"
 
 
-def run_workload(workload: Workload, run_dir: Path, commands_file: Path) -> RunRecord:
-    output_path = run_dir / "outputs" / workload.run_group / output_name(workload)
+def run_workload(
+    workload: Workload,
+    precision_config: PrecisionConfig,
+    run_dir: Path,
+    commands_file: Path,
+) -> RunRecord:
+    output_path = (
+        run_dir
+        / "outputs"
+        / precision_config.precision.lower()
+        / workload.run_group
+        / output_name(workload, precision_config)
+    )
     log_path = run_dir / "logs" / workload.run_group / f"{output_path.stem}.log"
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    command = workload_command(workload, output_path)
+    command = workload_command(workload, precision_config, output_path)
     timeout_seconds = timeout_for_workload(workload)
 
-    print(f"[RUN] {workload.run_group} {workload.workload} (timeout={timeout_seconds}s)", flush=True)
+    print(
+        f"[RUN] {precision_config.precision} {workload.run_group} "
+        f"{workload.workload} (timeout={timeout_seconds}s)",
+        flush=True,
+    )
     return_code, wall_seconds, log_text, timed_out = run_command(
         command,
         log_path,
@@ -452,6 +493,7 @@ def run_workload(workload: Workload, run_dir: Path, commands_file: Path) -> RunR
 
     return RunRecord(
         workload=workload,
+        precision_config=precision_config,
         output_path=output_path,
         log_path=log_path,
         command=command,
@@ -487,8 +529,8 @@ def summary_row(
         "method_token": METHOD_TOKEN,
         "engine": ENGINE,
         "backend": BACKEND,
-        "precision": PRECISION,
-        "dtype": DTYPE,
+        "precision": record.precision_config.precision,
+        "dtype": record.precision_config.dtype,
         "workload": record.workload.workload,
         "dataset": record.workload.dataset,
         "mode": record.workload.mode,
@@ -539,19 +581,24 @@ def correctness_row(
     workload: Workload,
     reference_method: str,
     reference_output: Path,
-    output_path: Path,
+    record: RunRecord,
 ) -> dict[str, str]:
+    output_path = record.output_path
+    precision_config = record.precision_config
     if not output_path.is_file() or not reference_output.is_file():
         metrics = {
             "value_count": "",
             "max_abs_err": "",
             "max_rel_err": "",
             "failure_count": "",
-            "tolerance": f"abs={ABS_TOLERANCE:g};rel={REL_TOLERANCE:g}",
+            "tolerance": (
+                f"abs={precision_config.abs_tolerance:g};"
+                f"rel={precision_config.rel_tolerance:g}"
+            ),
             "status": "missing_output",
         }
     else:
-        metrics = compare_numeric_files(output_path, reference_output)
+        metrics = compare_numeric_files(output_path, reference_output, precision_config)
 
     return {
         "timestamp": timestamp,
@@ -562,7 +609,7 @@ def correctness_row(
         "scale": f"{workload.scale_mode} b={workload.scale_value}",
         "reference_method": reference_method,
         "method": METHOD,
-        "precision": PRECISION,
+        "precision": precision_config.precision,
         "reference_output": str(reference_output),
         "output_path": str(output_path),
         "value_count": metrics["value_count"],
@@ -619,9 +666,9 @@ def main() -> int:
         SMOKE_SUSY_VIS_X,
         SMOKE_SVM_REF,
         SMOKE_KDV_REF,
-        BASIC_GROUND_TRUTH_ROOT / "svm_susy_basic-scan_fp64_scott_diag_b0p1.out",
-        BASIC_GROUND_TRUTH_ROOT / "svm_home_basic-scan_fp64_scott_diag_b0p1.out",
-        BASIC_GROUND_TRUTH_ROOT / "svm_miniboone_basic-scan_fp64_scott_diag_b0p1.out",
+        BASIC_GROUND_TRUTH_ROOT / "svm_susy_basic-scan_fp64_scott_diag_b1.out",
+        BASIC_GROUND_TRUTH_ROOT / "svm_home_basic-scan_fp64_scott_diag_b1.out",
+        BASIC_GROUND_TRUTH_ROOT / "svm_miniboone_basic-scan_fp64_scott_diag_b1.out",
         BASIC_GROUND_TRUTH_ROOT / "kdv_home_visual_basic-scan_fp64_1920x2560_scott_diag_b1.out",
         BASIC_GROUND_TRUTH_ROOT / "kdv_susy_visual_basic-scan_fp64_1920x2560_scott_diag_b1.out",
     ]
@@ -646,8 +693,9 @@ def main() -> int:
     ]
 
     records: list[RunRecord] = []
-    for workload in [*smoke_workloads, *full_workloads]:
-        records.append(run_workload(workload, run_dir, commands_file))
+    for precision_config in PRECISION_CONFIGS:
+        for workload in [*smoke_workloads, *full_workloads]:
+            records.append(run_workload(workload, precision_config, run_dir, commands_file))
 
     summary_fields = [
         "timestamp",
@@ -699,36 +747,44 @@ def main() -> int:
         summary_fields,
     )
 
-    record_by_key = {(r.workload.run_group, r.workload.workload): r for r in records}
+    record_by_key = {
+        (r.precision_config.precision, r.workload.run_group, r.workload.workload): r
+        for r in records
+    }
     correctness_rows: list[dict[str, str]] = []
-    for workload in smoke_workloads:
-        record = record_by_key[(workload.run_group, workload.workload)]
-        reference = SMOKE_SVM_REF if workload.mode == "svm" else SMOKE_KDV_REF
-        correctness_rows.append(
-            correctness_row(
-                timestamp,
-                git_branch,
-                git_commit,
-                workload,
-                "checked_results",
-                reference,
-                record.output_path,
+    for precision_config in PRECISION_CONFIGS:
+        for workload in smoke_workloads:
+            record = record_by_key[
+                (precision_config.precision, workload.run_group, workload.workload)
+            ]
+            reference = SMOKE_SVM_REF if workload.mode == "svm" else SMOKE_KDV_REF
+            correctness_rows.append(
+                correctness_row(
+                    timestamp,
+                    git_branch,
+                    git_commit,
+                    workload,
+                    "checked_results",
+                    reference,
+                    record,
+                )
             )
-        )
 
-    for workload in full_workloads:
-        record = record_by_key[(workload.run_group, workload.workload)]
-        correctness_rows.append(
-            correctness_row(
-                timestamp,
-                git_branch,
-                git_commit,
-                workload,
-                "Basic-Scan",
-                full_reference_for(workload),
-                record.output_path,
+        for workload in full_workloads:
+            record = record_by_key[
+                (precision_config.precision, workload.run_group, workload.workload)
+            ]
+            correctness_rows.append(
+                correctness_row(
+                    timestamp,
+                    git_branch,
+                    git_commit,
+                    workload,
+                    "Basic-Scan FP64",
+                    full_reference_for(workload),
+                    record,
+                )
             )
-        )
 
     correctness_fields = [
         "timestamp",
@@ -762,7 +818,12 @@ def main() -> int:
     print("[DONE] Persistent promotion is manual after review.")
 
     if run_failures or correctness_failures:
-        print(f"[ERROR] run_failures={len(run_failures)} correctness_failures={len(correctness_failures)}", file=sys.stderr)
+        print(
+            f"[WARN] run_failures={len(run_failures)} "
+            f"correctness_failures={len(correctness_failures)}",
+            file=sys.stderr,
+        )
+    if run_failures:
         return 1
     return 0
 

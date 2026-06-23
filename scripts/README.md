@@ -63,14 +63,14 @@ Default paths:
 | --- | --- |
 | Dataset root | `/home/ubuntu/Documents/workspace/dataset/GPU-accelerated_Kernel_Density_Computation/` |
 | Temporary result root | `/home/ubuntu/Documents/workspace/GPU-accelerated_Kernel_Density_Exact/tmp-results/stage0/keops/` |
-| Basic-Scan reference root | `/home/ubuntu/Documents/workspace/dataset/GPU-accelerated_Kernel_Density_Computation/exact/experiments/stage0/local-3080ti/basic/basic-scan-ground-truth/` |
+| Basic-Scan reference root | `/home/ubuntu/Documents/workspace/dataset/GPU-accelerated_Kernel_Density_Computation/exact/experiments/stage0/ground_truth/` |
 
 Default scale mode is diagonal Scott with separate multipliers for the two
 workload families:
 
 | Workload type | Default |
 | --- | --- |
-| SVM | `--scott-diag 0.1` |
+| SVM | `--scott-diag 1` |
 | KDV | `--scott-diag 1` |
 
 The suite records machine inventory, logs, raw outputs, `summary.csv`, and
@@ -94,7 +94,7 @@ Default remote paths:
 | --- | --- |
 | Dataset root | `/home/lxheq/Documents/workspace/dataset/GPU-accelerated_Kernel_Density_Computation/` |
 | Temporary result root | `/home/lxheq/Documents/workspace/GPU-accelerated_Kernel_Density_Exact/tmp-results/stage0/keops/` |
-| Basic-Scan reference root | `/home/lxheq/Documents/workspace/dataset/GPU-accelerated_Kernel_Density_Computation/exact/experiments/stage0/local-3080ti/basic/basic-scan-ground-truth/` |
+| Basic-Scan reference root | `/home/lxheq/Documents/workspace/dataset/GPU-accelerated_Kernel_Density_Computation/exact/experiments/stage0/ground_truth/` |
 | CUDA toolkit | `/usr/local/cuda-12.4/` |
 
 ## Five Workloads
