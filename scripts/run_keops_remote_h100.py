@@ -54,7 +54,7 @@ ABS_TOLERANCE = 1e-3
 REL_TOLERANCE = 1e-5
 SMOKE_TIMEOUT_SECONDS = 600
 SVM_TIMEOUT_SECONDS = 3600
-KDV_TIMEOUT_SECONDS = 21600
+KDV_TIMEOUT_SECONDS = 3600
 GPU_QUERY_COMMAND = [
     "nvidia-smi",
     "--query-gpu=name,memory.total,driver_version,compute_cap",
