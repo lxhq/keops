@@ -17,7 +17,7 @@ from stage0p1_output_utils import Attempt, run_attempts, run_env_with_cuda
 KEOPS_ROOT = Path("/home/lxheq/Documents/workspace/GPU-accelerated_Kernel_Density_Exact/baselines/keops")
 HELPER = KEOPS_ROOT / "scripts/keops_exact_kde.py"
 CUDA_HOME = Path("/usr/local/cuda-12.4")
-PYTHON_BIN = Path("/home/lxheq/Documents/workspace/GPU-accelerated_Kernel_Density_Exact/venvs/stage0p1-kde/bin/python")
+PYTHON_BIN = Path("/home/lxheq/Documents/workspace/GPU-accelerated_Kernel_Density_Exact/venvs/kde-baselines/bin/python")
 RUN_ROOT = Path(
     os.environ.get(
         "STAGE0P1_RUN_ROOT",
