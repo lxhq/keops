@@ -17,7 +17,7 @@ from stage0p1_output_utils import Attempt, run_attempts, run_env_with_cuda
 KEOPS_ROOT = Path("/home/lxheq/Documents/workspace/GPU-accelerated_Kernel_Density_Exact/baselines/keops")
 HELPER = KEOPS_ROOT / "scripts/keops_exact_kde.py"
 CUDA_HOME = Path("/usr/local/cuda-12.4")
-PYTHON_BIN = "python3"
+PYTHON_BIN = Path("/home/lxheq/Documents/workspace/GPU-accelerated_Kernel_Density_Exact/venvs/stage0p1-kde/bin/python")
 RUN_ROOT = Path(
     os.environ.get(
         "STAGE0P1_RUN_ROOT",
@@ -44,6 +44,13 @@ WORKLOADS = (
 PRECISIONS = (("FP64", "float64"), ("FP32", "float32"))
 
 
+def venv_library_paths() -> list[Path]:
+    site_packages = PYTHON_BIN.parents[1] / "lib/python3.10/site-packages"
+    paths = sorted(site_packages.glob("lib*/lib64"))
+    paths.extend(sorted((site_packages / "nvidia").glob("*/lib")))
+    return paths
+
+
 def output_rel(precision: str, workload: str, rows: int | None, cols: int | None) -> Path:
     token = precision.lower()
     if rows is not None and cols is not None:
@@ -55,7 +62,7 @@ def output_rel(precision: str, workload: str, rows: int | None, cols: int | None
 
 def command_for(mode: str, data_path: Path, query_path: Path | None, rows: int | None, cols: int | None, dtype: str, out: Path) -> tuple[str, ...]:
     batch_size = str(SVM_BATCH_SIZE if mode == "svm" else KDV_BATCH_SIZE)
-    command: list[str] = [PYTHON_BIN, str(HELPER), mode]
+    command: list[str] = [str(PYTHON_BIN), str(HELPER), mode]
     if mode == "svm":
         assert query_path is not None
         command.extend([str(query_path), str(data_path), str(out)])
@@ -81,6 +88,13 @@ def command_for(mode: str, data_path: Path, query_path: Path | None, rows: int |
 
 def planned_attempts() -> list[Attempt]:
     env = run_env_with_cuda(CUDA_HOME, [KEOPS_ROOT / "pykeops", KEOPS_ROOT / "keopscore"])
+    env["PYTHONNOUSERSITE"] = "1"
+    env["PATH"] = f"{PYTHON_BIN.parent}{os.pathsep}{env.get('PATH', '')}"
+    lib_paths = [str(path) for path in venv_library_paths() if path.exists()]
+    if lib_paths:
+        joined = os.pathsep.join(lib_paths)
+        env["LD_LIBRARY_PATH"] = os.pathsep.join([joined, env.get("LD_LIBRARY_PATH", "")])
+        env["LIBRARY_PATH"] = os.pathsep.join([joined, env.get("LIBRARY_PATH", "")])
     attempts: list[Attempt] = []
     for workload, mode, data_path, query_path, rows, cols, expected in WORKLOADS:
         for precision, dtype in PRECISIONS:
