@@ -239,6 +239,7 @@ def main() -> int:
                     batch_size,
                     output_path,
                 )
+                output_path.parent.mkdir(parents=True, exist_ok=True)
                 print(
                     f"[RUN] {workload.workload} {precision.precision} batch={batch_size}",
                     flush=True,

@@ -65,6 +65,7 @@ METHOD_TOKEN = "keops"
 
 def run_env(keops_root: Path, cuda_home: Path, cache_root: Path | None = None) -> dict[str, str]:
     env = os.environ.copy()
+    env.pop("PYTHONNOUSERSITE", None)
     py_paths = [str(keops_root / "pykeops"), str(keops_root / "keopscore")]
     if env.get("PYTHONPATH"):
         py_paths.append(env["PYTHONPATH"])

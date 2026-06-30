@@ -182,6 +182,7 @@ def main() -> int:
                 SMOKE_BATCH_SIZE,
                 output_path,
             )
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             print(f"[RUN] local smoke {workload.workload} {precision.precision}", flush=True)
             return_code, wall_seconds, log_text, timed_out = run_command(
                 command,
