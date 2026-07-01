@@ -64,20 +64,6 @@ WORKLOADS = (
 )
 
 
-def write_one_query_file(source_query: Path, target_query: Path) -> None:
-    with source_query.open("r", encoding="utf-8") as source:
-        header = source.readline().split()
-        if len(header) != 2:
-            raise ValueError(f"Invalid query matrix header: {source_query}")
-        _, dim = header
-        first_row = source.readline()
-        if not first_row:
-            raise ValueError(f"Query matrix has no rows: {source_query}")
-
-    target_query.parent.mkdir(parents=True, exist_ok=True)
-    target_query.write_text(f"1 {dim}\n{first_row}", encoding="utf-8")
-
-
 def summary_row(
     *,
     timestamp: str,
@@ -101,7 +87,7 @@ def summary_row(
     query_rows, _ = matrix_shape(workload.query_path)
     warmup_policy = metrics.get(
         "warmup_policy",
-        "full_untimed_keops_call" if timing_mode == "warm" else "existing_cache_fresh_process",
+        "full_untimed_keops_call" if timing_mode == "warm" else "none",
     )
     return {
         "timestamp": timestamp,
@@ -116,8 +102,18 @@ def summary_row(
         "timing_mode": timing_mode,
         "warmup_policy": warmup_policy,
         "timing_scope": metrics.get("timing_scope", ""),
+        "warmup_call_seconds": metrics.get("warmup_call_seconds", ""),
         "runtime_s": metrics.get("execution_seconds", ""),
         "qps": metrics.get("qps", ""),
+        "keops_import_seconds": metrics.get("keops_import_seconds", ""),
+        "data_read_seconds": metrics.get("data_read_seconds", ""),
+        "scale_coeff_seconds": metrics.get("scale_coeff_seconds", ""),
+        "query_read_seconds": metrics.get("query_read_seconds", ""),
+        "query_construct_seconds": metrics.get("query_construct_seconds", ""),
+        "data_scale_seconds": metrics.get("data_scale_seconds", ""),
+        "query_scale_seconds": metrics.get("query_scale_seconds", ""),
+        "weights_read_seconds": metrics.get("weights_read_seconds", ""),
+        "pre_timer_total_seconds": metrics.get("pre_timer_total_seconds", ""),
         "max_abs_err": correctness["max_abs_err"],
         "max_rel_err": correctness["max_rel_err"],
         "abs_p01": correctness["abs_p01"],
@@ -191,7 +187,7 @@ def write_timing_scope(path: Path) -> None:
             "includes_jit_cache_load": "yes_if_triggered_by_measured_call",
             "includes_output_transfer": "yes",
             "includes_disk_write": "no",
-            "notes": "Fresh Python process; run-local KeOps cache is prepared before accepted rows.",
+            "notes": "Fresh Python process; no explicit pre-cache or untimed call.",
         },
         {
             "method": METHOD,
@@ -241,7 +237,6 @@ def main() -> int:
     summary_file = run_dir / "summary.csv"
     runner_status_file = run_dir / "runner_status.csv"
     cache_root = run_dir / "keops-cache"
-    cache_prepare_root = run_dir / "cache_prepare"
 
     run_dir.mkdir(parents=True, exist_ok=True)
     write_text(
@@ -281,7 +276,7 @@ def main() -> int:
     )
     with inventory_file.open("a", encoding="utf-8") as handle:
         handle.write(f"\nkeops_cache_folder: {cache_root}\n")
-        handle.write("cache_policy: run-local cache prepared before accepted timing rows\n")
+        handle.write("cache_policy: no explicit pre-cache; cache starts empty for this runner\n")
 
     write_timing_scope(timing_scope_file)
 
@@ -294,47 +289,6 @@ def main() -> int:
         reference_path = ground_truth_path(GROUND_TRUTH_ROOT, workload)
 
         for precision in PRECISIONS:
-            prepare_query = cache_prepare_root / workload.workload / f"{workload.workload}_one_query.data"
-            prepare_output = (
-                cache_prepare_root
-                / workload.workload
-                / precision.precision.lower()
-                / f"{workload.workload}_{precision.precision.lower()}_cache_prepare.out"
-            )
-            prepare_log = (
-                cache_prepare_root
-                / workload.workload
-                / precision.precision.lower()
-                / f"{workload.workload}_{precision.precision.lower()}_cache_prepare.log"
-            )
-            write_one_query_file(workload.query_path, prepare_query)
-            prepare_workload = SvmWorkload(
-                workload.workload,
-                workload.dataset,
-                workload.data_path,
-                prepare_query,
-                workload.scale_value,
-            )
-            prepare_command = keops_command(
-                PYTHON_BIN,
-                HELPER,
-                KEOPS_ROOT,
-                prepare_workload,
-                precision,
-                1,
-                prepare_output,
-                "cold_start",
-            )
-            print(f"[CACHE] {workload.workload} {precision.precision}", flush=True)
-            run_command(
-                prepare_command,
-                prepare_log,
-                commands_file,
-                KEOPS_ROOT,
-                env,
-                TIMEOUT_SECONDS,
-            )
-
             for timing_mode in TIMING_MODES:
                 output_path = (
                     run_dir
@@ -439,8 +393,18 @@ def main() -> int:
         "timing_mode",
         "warmup_policy",
         "timing_scope",
+        "warmup_call_seconds",
         "runtime_s",
         "qps",
+        "keops_import_seconds",
+        "data_read_seconds",
+        "scale_coeff_seconds",
+        "query_read_seconds",
+        "query_construct_seconds",
+        "data_scale_seconds",
+        "query_scale_seconds",
+        "weights_read_seconds",
+        "pre_timer_total_seconds",
         "max_abs_err",
         "max_rel_err",
         "abs_p01",
@@ -491,8 +455,6 @@ def main() -> int:
 
     if cache_root.exists():
         shutil.rmtree(cache_root)
-    if cache_prepare_root.exists():
-        shutil.rmtree(cache_prepare_root)
 
     write_sha256sums(run_dir)
 

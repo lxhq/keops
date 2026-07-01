@@ -205,33 +205,48 @@ def write_vector(path: str | Path, values: Iterable[np.ndarray]) -> None:
                 f.write(f"{float(value):.17g}\n")
 
 
-def timed_run(args, compute_output: Callable[[], np.ndarray]) -> Tuple[float, np.ndarray, str]:
-    warmup_policy = (
-        "existing_cache_fresh_process" if args.engine == "keops" else "none"
-    )
+def timed_run(args, compute_output: Callable[[], np.ndarray]) -> Tuple[float, np.ndarray, str, float]:
+    warmup_policy = "none"
+    warmup_elapsed = 0.0
     if args.timing_mode == "warm":
+        warmup_start = time.perf_counter()
         compute_output()
+        warmup_elapsed = time.perf_counter() - warmup_start
         warmup_policy = "full_untimed_keops_call" if args.engine == "keops" else "full_untimed_numpy_call"
 
     start_time = time.perf_counter()
     output = compute_output()
     elapsed = time.perf_counter() - start_time
-    return elapsed, output, warmup_policy
+    return elapsed, output, warmup_policy, warmup_elapsed
 
 
-def run_svm(args, data: np.ndarray, coeff: np.ndarray, LazyTensor) -> Tuple[float, int, int, str]:
+def run_svm(
+    args,
+    data: np.ndarray,
+    coeff: np.ndarray,
+    LazyTensor,
+) -> Tuple[float, int, int, str, float, dict[str, float]]:
+    query_read_start = time.perf_counter()
     query = read_matrix(args.query, data.dtype)
+    query_read_elapsed = time.perf_counter() - query_read_start
     if query.shape[1] != data.shape[1]:
         raise ValueError(
             f"dimension mismatch: data dim={data.shape[1]}, query dim={query.shape[1]}"
         )
 
+    data_scale_start = time.perf_counter()
     data_scaled = data * coeff
+    data_scale_elapsed = time.perf_counter() - data_scale_start
+    query_scale_start = time.perf_counter()
     query *= coeff
+    query_scale_elapsed = time.perf_counter() - query_scale_start
 
     weights = None
+    weights_read_elapsed = 0.0
     if args.weights is not None:
+        weights_read_start = time.perf_counter()
         weights = read_weights(args.weights, data.shape[0], data.dtype)
+        weights_read_elapsed = time.perf_counter() - weights_read_start
 
     def compute_output() -> np.ndarray:
         output = np.empty(query.shape[0], dtype=data.dtype)
@@ -247,15 +262,39 @@ def run_svm(args, data: np.ndarray, coeff: np.ndarray, LazyTensor) -> Tuple[floa
             )
         return output
 
-    elapsed, output, warmup_policy = timed_run(args, compute_output)
+    elapsed, output, warmup_policy, warmup_elapsed = timed_run(args, compute_output)
     write_vector(args.output, (output,))
-    return elapsed, query.shape[0], batch_count(query.shape[0], args.batch_size), warmup_policy
+    prep_times = {
+        "query_read_seconds": query_read_elapsed,
+        "query_construct_seconds": 0.0,
+        "data_scale_seconds": data_scale_elapsed,
+        "query_scale_seconds": query_scale_elapsed,
+        "weights_read_seconds": weights_read_elapsed,
+    }
+    return (
+        elapsed,
+        query.shape[0],
+        batch_count(query.shape[0], args.batch_size),
+        warmup_policy,
+        warmup_elapsed,
+        prep_times,
+    )
 
 
-def run_kdv(args, data: np.ndarray, coeff: np.ndarray, LazyTensor) -> Tuple[float, int, int, str]:
+def run_kdv(
+    args,
+    data: np.ndarray,
+    coeff: np.ndarray,
+    LazyTensor,
+) -> Tuple[float, int, int, str, float, dict[str, float]]:
     if data.shape[1] != 2:
         raise ValueError(f"KDV mode requires 2D data, found dim={data.shape[1]}")
 
+    data_scale_start = time.perf_counter()
+    data_scaled = data * coeff
+    data_scale_elapsed = time.perf_counter() - data_scale_start
+
+    query_construct_start = time.perf_counter()
     row_l = float(data[:, 0].min())
     row_u = float(data[:, 0].max())
     col_l = float(data[:, 1].min())
@@ -263,10 +302,12 @@ def run_kdv(args, data: np.ndarray, coeff: np.ndarray, LazyTensor) -> Tuple[floa
     row_incr = 0.0 if args.rows <= 1 else (row_u - row_l) / float(args.rows - 1)
     col_incr = 0.0 if args.cols <= 1 else (col_u - col_l) / float(args.cols - 1)
 
-    data_scaled = data * coeff
     weights = None
+    weights_read_elapsed = 0.0
     if args.weights is not None:
+        weights_read_start = time.perf_counter()
         weights = read_weights(args.weights, data.shape[0], data.dtype)
+        weights_read_elapsed = time.perf_counter() - weights_read_start
 
     total_queries = args.rows * args.cols
     row_coords = row_l + np.arange(args.rows, dtype=data.dtype) * row_incr
@@ -274,7 +315,10 @@ def run_kdv(args, data: np.ndarray, coeff: np.ndarray, LazyTensor) -> Tuple[floa
     query = np.empty((total_queries, 2), dtype=data.dtype)
     query[:, 0] = np.repeat(row_coords, args.cols)
     query[:, 1] = np.tile(col_coords, args.rows)
+    query_construct_elapsed = time.perf_counter() - query_construct_start
+    query_scale_start = time.perf_counter()
     query *= coeff
+    query_scale_elapsed = time.perf_counter() - query_scale_start
 
     def compute_output() -> np.ndarray:
         output = np.empty(total_queries, dtype=data.dtype)
@@ -290,14 +334,28 @@ def run_kdv(args, data: np.ndarray, coeff: np.ndarray, LazyTensor) -> Tuple[floa
             )
         return output
 
-    elapsed, output, warmup_policy = timed_run(args, compute_output)
+    elapsed, output, warmup_policy, warmup_elapsed = timed_run(args, compute_output)
 
     grid = output.reshape(args.rows, args.cols)
     with Path(args.output).open("w", encoding="utf-8") as f:
         for row in grid:
             f.write(" ".join(f"{float(v):.17g}" for v in row))
             f.write("\n")
-    return elapsed, total_queries, batch_count(total_queries, args.batch_size), warmup_policy
+    prep_times = {
+        "query_read_seconds": 0.0,
+        "query_construct_seconds": query_construct_elapsed,
+        "data_scale_seconds": data_scale_elapsed,
+        "query_scale_seconds": query_scale_elapsed,
+        "weights_read_seconds": weights_read_elapsed,
+    }
+    return (
+        elapsed,
+        total_queries,
+        batch_count(total_queries, args.batch_size),
+        warmup_policy,
+        warmup_elapsed,
+        prep_times,
+    )
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -389,24 +447,35 @@ def main() -> int:
     dtype = np.dtype(args.dtype)
 
     LazyTensor = None
+    keops_import_elapsed = 0.0
     if args.engine == "keops":
+        import_start = time.perf_counter()
         LazyTensor = import_keops(args.local_keops_root, not args.no_local_keops)
+        keops_import_elapsed = time.perf_counter() - import_start
 
-    load_start = time.perf_counter()
+    data_read_start = time.perf_counter()
     data = read_matrix(args.data, dtype)
+    data_read_elapsed = time.perf_counter() - data_read_start
+    scale_coeff_start = time.perf_counter()
     coeff = scale_coefficients(data, args)
-    load_elapsed = time.perf_counter() - load_start
+    scale_coeff_elapsed = time.perf_counter() - scale_coeff_start
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if args.mode == "svm":
-        elapsed, query_count, batches, warmup_policy = run_svm(args, data, coeff, LazyTensor)
+        elapsed, query_count, batches, warmup_policy, warmup_elapsed, prep_times = run_svm(args, data, coeff, LazyTensor)
     elif args.mode == "kdv":
-        elapsed, query_count, batches, warmup_policy = run_kdv(args, data, coeff, LazyTensor)
+        elapsed, query_count, batches, warmup_policy, warmup_elapsed, prep_times = run_kdv(args, data, coeff, LazyTensor)
     else:
         raise ValueError(f"Unsupported mode: {args.mode}")
 
+    pre_timer_total = (
+        keops_import_elapsed
+        + data_read_elapsed
+        + scale_coeff_elapsed
+        + sum(prep_times.values())
+    )
     qps = float(query_count) / elapsed if elapsed > 0 else float("inf")
     print(f"Mode: {args.mode}")
     print(f"Engine: {args.engine}")
@@ -418,17 +487,28 @@ def main() -> int:
     print(f"Batch count: {batches}")
     print(f"Timing mode: {args.timing_mode}")
     print(f"Warmup policy: {warmup_policy}")
-    print(f"Load/preprocess time: {load_elapsed:.6f} seconds")
+    print(f"Warmup call time: {warmup_elapsed:.6f} seconds")
+    print(f"Load/preprocess time: {pre_timer_total:.6f} seconds")
     print(f"Elapsed time: {elapsed:.6f} seconds")
     method_label = "KeOps" if args.engine == "keops" else args.engine
     print(f"Method {method_label}: {qps:.6f} Queries/sec")
     print("timing_scope: end_to_end_in_memory")
     print(f"timing_mode: {args.timing_mode}")
     print(f"warmup_policy: {warmup_policy}")
+    print(f"warmup_call_seconds: {warmup_elapsed:.9f}")
     print(f"execution_seconds: {elapsed:.9f}")
     print(f"query_count: {query_count}")
     print(f"batch_size: {args.batch_size}")
     print(f"batch_count: {batches}")
+    print(f"keops_import_seconds: {keops_import_elapsed:.9f}")
+    print(f"data_read_seconds: {data_read_elapsed:.9f}")
+    print(f"scale_coeff_seconds: {scale_coeff_elapsed:.9f}")
+    print(f"query_read_seconds: {prep_times['query_read_seconds']:.9f}")
+    print(f"query_construct_seconds: {prep_times['query_construct_seconds']:.9f}")
+    print(f"data_scale_seconds: {prep_times['data_scale_seconds']:.9f}")
+    print(f"query_scale_seconds: {prep_times['query_scale_seconds']:.9f}")
+    print(f"weights_read_seconds: {prep_times['weights_read_seconds']:.9f}")
+    print(f"pre_timer_total_seconds: {pre_timer_total:.9f}")
     print(f"qps: {qps:.9f}")
     print(f"Output: {output_path}")
     return 0
