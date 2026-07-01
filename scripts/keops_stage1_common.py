@@ -56,7 +56,7 @@ PRECISIONS = (
 )
 
 BATCH_SIZES = (10000, 8192, 4096, 2048, 1024, 512)
-EXPECTED_TIMING_SCOPE = "in_memory_query_pipeline"
+EXPECTED_TIMING_SCOPE = "end_to_end_in_memory"
 BACKEND = "GPU"
 ENGINE = "keops"
 METHOD = "KeOps"
@@ -165,7 +165,16 @@ def run_shell_capture(command: list[str], keops_root: Path, env: dict[str, str])
 
 def parse_metrics(log_text: str) -> dict[str, str]:
     metrics: dict[str, str] = {}
-    for key in ("timing_scope", "execution_seconds", "query_count", "qps"):
+    for key in (
+        "timing_scope",
+        "timing_mode",
+        "warmup_policy",
+        "execution_seconds",
+        "query_count",
+        "batch_size",
+        "batch_count",
+        "qps",
+    ):
         match = re.search(rf"^{key}:\s*(.+?)\s*$", log_text, re.MULTILINE)
         if match:
             metrics[key] = match.group(1)
@@ -358,6 +367,7 @@ def keops_command(
     precision: PrecisionConfig,
     batch_size: int,
     output_path: Path,
+    timing_mode: str = "cold_start",
 ) -> list[str]:
     return [
         python_bin,
@@ -370,6 +380,8 @@ def keops_command(
         workload.scale_value,
         "--batch-size",
         str(batch_size),
+        "--timing-mode",
+        timing_mode,
         "--engine",
         ENGINE,
         "--backend",

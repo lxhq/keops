@@ -18,7 +18,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Iterable, Optional, Tuple
+from typing import Callable, Iterable, Optional, Tuple
 
 import numpy as np
 
@@ -194,6 +194,10 @@ def batched_ranges(total: int, batch_size: int) -> Iterable[Tuple[int, int]]:
         yield start, min(start + batch_size, total)
 
 
+def batch_count(total: int, batch_size: int) -> int:
+    return (total + batch_size - 1) // batch_size
+
+
 def write_vector(path: str | Path, values: Iterable[np.ndarray]) -> None:
     with Path(path).open("w", encoding="utf-8") as f:
         for batch in values:
@@ -201,7 +205,21 @@ def write_vector(path: str | Path, values: Iterable[np.ndarray]) -> None:
                 f.write(f"{float(value):.17g}\n")
 
 
-def run_svm(args, data: np.ndarray, coeff: np.ndarray, LazyTensor) -> Tuple[float, int]:
+def timed_run(args, compute_output: Callable[[], np.ndarray]) -> Tuple[float, np.ndarray, str]:
+    warmup_policy = (
+        "existing_cache_fresh_process" if args.engine == "keops" else "none"
+    )
+    if args.timing_mode == "warm":
+        compute_output()
+        warmup_policy = "full_untimed_keops_call" if args.engine == "keops" else "full_untimed_numpy_call"
+
+    start_time = time.perf_counter()
+    output = compute_output()
+    elapsed = time.perf_counter() - start_time
+    return elapsed, output, warmup_policy
+
+
+def run_svm(args, data: np.ndarray, coeff: np.ndarray, LazyTensor) -> Tuple[float, int, int, str]:
     query = read_matrix(args.query, data.dtype)
     if query.shape[1] != data.shape[1]:
         raise ValueError(
@@ -215,36 +233,26 @@ def run_svm(args, data: np.ndarray, coeff: np.ndarray, LazyTensor) -> Tuple[floa
     if args.weights is not None:
         weights = read_weights(args.weights, data.shape[0], data.dtype)
 
-    if args.warmup and query.shape[0] > 0:
-        warmup_end = min(args.batch_size, query.shape[0])
-        compute_sum(
-            args.engine,
-            data_scaled,
-            query[:warmup_end],
-            weights,
-            args.backend,
-            LazyTensor,
-            args.data_batch_size,
-        )
+    def compute_output() -> np.ndarray:
+        output = np.empty(query.shape[0], dtype=data.dtype)
+        for start, end in batched_ranges(query.shape[0], args.batch_size):
+            output[start:end] = compute_sum(
+                args.engine,
+                data_scaled,
+                query[start:end],
+                weights,
+                args.backend,
+                LazyTensor,
+                args.data_batch_size,
+            )
+        return output
 
-    output = np.empty(query.shape[0], dtype=data.dtype)
-    start_time = time.perf_counter()
-    for start, end in batched_ranges(query.shape[0], args.batch_size):
-        output[start:end] = compute_sum(
-            args.engine,
-            data_scaled,
-            query[start:end],
-            weights,
-            args.backend,
-            LazyTensor,
-            args.data_batch_size,
-        )
-    elapsed = time.perf_counter() - start_time
+    elapsed, output, warmup_policy = timed_run(args, compute_output)
     write_vector(args.output, (output,))
-    return elapsed, query.shape[0]
+    return elapsed, query.shape[0], batch_count(query.shape[0], args.batch_size), warmup_policy
 
 
-def run_kdv(args, data: np.ndarray, coeff: np.ndarray, LazyTensor) -> Tuple[float, int]:
+def run_kdv(args, data: np.ndarray, coeff: np.ndarray, LazyTensor) -> Tuple[float, int, int, str]:
     if data.shape[1] != 2:
         raise ValueError(f"KDV mode requires 2D data, found dim={data.shape[1]}")
 
@@ -268,38 +276,28 @@ def run_kdv(args, data: np.ndarray, coeff: np.ndarray, LazyTensor) -> Tuple[floa
     query[:, 1] = np.tile(col_coords, args.rows)
     query *= coeff
 
-    if args.warmup and total_queries > 0:
-        warmup_end = min(args.batch_size, total_queries)
-        compute_sum(
-            args.engine,
-            data_scaled,
-            query[:warmup_end],
-            weights,
-            args.backend,
-            LazyTensor,
-            args.data_batch_size,
-        )
+    def compute_output() -> np.ndarray:
+        output = np.empty(total_queries, dtype=data.dtype)
+        for start, end in batched_ranges(total_queries, args.batch_size):
+            output[start:end] = compute_sum(
+                args.engine,
+                data_scaled,
+                query[start:end],
+                weights,
+                args.backend,
+                LazyTensor,
+                args.data_batch_size,
+            )
+        return output
 
-    output = np.empty(total_queries, dtype=data.dtype)
-    start_time = time.perf_counter()
-    for start, end in batched_ranges(total_queries, args.batch_size):
-        output[start:end] = compute_sum(
-            args.engine,
-            data_scaled,
-            query[start:end],
-            weights,
-            args.backend,
-            LazyTensor,
-            args.data_batch_size,
-        )
-    elapsed = time.perf_counter() - start_time
+    elapsed, output, warmup_policy = timed_run(args, compute_output)
 
     grid = output.reshape(args.rows, args.cols)
     with Path(args.output).open("w", encoding="utf-8") as f:
         for row in grid:
             f.write(" ".join(f"{float(v):.17g}" for v in row))
             f.write("\n")
-    return elapsed, total_queries
+    return elapsed, total_queries, batch_count(total_queries, args.batch_size), warmup_policy
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -315,6 +313,15 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         help="Diagonal Scott multiplier b",
     )
     parser.add_argument("--batch-size", type=int, default=4096)
+    parser.add_argument(
+        "--timing-mode",
+        choices=("cold_start", "warm"),
+        default="cold_start",
+        help=(
+            "cold_start measures one pass in this process; warm runs one full "
+            "untimed pass before measuring the second pass."
+        ),
+    )
     parser.add_argument("--dtype", choices=("float64", "float32"), default="float64")
     parser.add_argument("--weights", default=None, help="Optional one-value-per-row weights")
     parser.add_argument(
@@ -347,11 +354,9 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--no-warmup",
-        action="store_false",
-        dest="warmup",
-        help="Include first-call/JIT overhead in elapsed time.",
+        action="store_true",
+        help="Deprecated alias for --timing-mode cold_start.",
     )
-    parser.set_defaults(warmup=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -374,6 +379,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--batch-size must be positive")
     if args.data_batch_size <= 0:
         parser.error("--data-batch-size must be positive")
+    if args.no_warmup:
+        args.timing_mode = "cold_start"
     return args
 
 
@@ -394,9 +401,9 @@ def main() -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if args.mode == "svm":
-        elapsed, query_count = run_svm(args, data, coeff, LazyTensor)
+        elapsed, query_count, batches, warmup_policy = run_svm(args, data, coeff, LazyTensor)
     elif args.mode == "kdv":
-        elapsed, query_count = run_kdv(args, data, coeff, LazyTensor)
+        elapsed, query_count, batches, warmup_policy = run_kdv(args, data, coeff, LazyTensor)
     else:
         raise ValueError(f"Unsupported mode: {args.mode}")
 
@@ -407,13 +414,21 @@ def main() -> int:
     print(f"Data: size={data.shape[0]}, dim={data.shape[1]}")
     print(f"Kernel scale: {scale_description(args)}")
     print(f"Query count: {query_count}")
+    print(f"Batch size: {args.batch_size}")
+    print(f"Batch count: {batches}")
+    print(f"Timing mode: {args.timing_mode}")
+    print(f"Warmup policy: {warmup_policy}")
     print(f"Load/preprocess time: {load_elapsed:.6f} seconds")
     print(f"Elapsed time: {elapsed:.6f} seconds")
     method_label = "KeOps" if args.engine == "keops" else args.engine
     print(f"Method {method_label}: {qps:.6f} Queries/sec")
-    print("timing_scope: in_memory_query_pipeline")
+    print("timing_scope: end_to_end_in_memory")
+    print(f"timing_mode: {args.timing_mode}")
+    print(f"warmup_policy: {warmup_policy}")
     print(f"execution_seconds: {elapsed:.9f}")
     print(f"query_count: {query_count}")
+    print(f"batch_size: {args.batch_size}")
+    print(f"batch_count: {batches}")
     print(f"qps: {qps:.9f}")
     print(f"Output: {output_path}")
     return 0
