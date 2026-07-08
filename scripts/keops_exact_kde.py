@@ -22,25 +22,15 @@ from typing import Callable, Iterable, Optional, Tuple
 
 import numpy as np
 
+from stage2_dense_io import read_dense_matrix, read_dense_vector
+
 
 def read_matrix(path: str | Path, dtype: np.dtype) -> np.ndarray:
-    path = Path(path)
-    with path.open("r", encoding="utf-8") as f:
-        header = f.readline().strip().split()
-        if len(header) != 2:
-            raise ValueError(f"{path}: expected first line '<rows> <dim>'")
-        rows, dim = int(header[0]), int(header[1])
-        values = np.fromfile(f, sep=" ", dtype=dtype, count=rows * dim)
-
-    if values.size != rows * dim:
-        raise ValueError(
-            f"{path}: expected {rows * dim} numeric values, found {values.size}"
-        )
-    return values.reshape(rows, dim)
+    return read_dense_matrix(path, dtype)
 
 
 def read_weights(path: str | Path, expected_rows: int, dtype: np.dtype) -> np.ndarray:
-    weights = np.loadtxt(path, dtype=dtype).reshape(-1)
+    weights = read_dense_vector(path, dtype)
     if weights.size != expected_rows:
         raise ValueError(
             f"{path}: expected {expected_rows} weights, found {weights.size}"
