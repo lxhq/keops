@@ -79,11 +79,18 @@ def require_paths(paths: Iterable[Path]) -> None:
 
 def run_env(cache_dir: Path) -> dict[str, str]:
     env = os.environ.copy()
+    cuda_lib_dirs = [
+        CUDA_HOME / "lib64",
+        CUDA_HOME / "targets/x86_64-linux/lib",
+    ]
+    existing_cuda_lib_dirs = [str(path) for path in cuda_lib_dirs if path.exists()]
     env["PYTHONNOUSERSITE"] = "1"
     env["CUDA_HOME"] = str(CUDA_HOME)
     env["PATH"] = os.pathsep.join([str(PYTHON_BIN.parent), str(CUDA_HOME / "bin"), env.get("PATH", "")])
-    env["LD_LIBRARY_PATH"] = os.pathsep.join(
-        [str(CUDA_HOME / "lib64"), env.get("LD_LIBRARY_PATH", "")]
+    env["LD_LIBRARY_PATH"] = os.pathsep.join([*existing_cuda_lib_dirs, env.get("LD_LIBRARY_PATH", "")])
+    env["LIBRARY_PATH"] = os.pathsep.join([*existing_cuda_lib_dirs, env.get("LIBRARY_PATH", "")])
+    env["CPLUS_INCLUDE_PATH"] = os.pathsep.join(
+        [str(CUDA_HOME / "include"), env.get("CPLUS_INCLUDE_PATH", "")]
     )
     env["KEOPS_CACHE_FOLDER"] = str(cache_dir)
     return env
