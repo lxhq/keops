@@ -58,11 +58,18 @@ SCALE_ARGS = ("--scott-diag", "1")
 PRECISION = "FP64"
 DTYPE = "float64"
 RELATIVE_TOLERANCE = 1e-5
-IMPLEMENTATION_PATHS = (
+MAX_DATA_SCALARS = 2_000_000_000
+CORE_IMPLEMENTATION_PATHS = (
     "keopscore",
     "pykeops",
-    "scripts/keops_exact_kde.py",
     "scripts/stage2_dense_io.py",
+)
+PRE_SPLIT_ACCEPTED_COMMITS = {
+    "6932604c2464aa2ad16a01281483b4f1d493a609",
+    "fee1e7c654cf3d21360dfe80237433836aff1698",
+}
+SPLIT_HELPER_SHA256 = (
+    "de5b78bd75f0585b61ed6247fec03832d1608c2f104e051aa7bee60c9132e90b"
 )
 
 
@@ -108,6 +115,19 @@ class Workload:
     def cache_path(self) -> Path:
         return CACHE_ROOT / self.name
 
+    @property
+    def data_split_rows(self) -> int:
+        return min(
+            self.data_rows,
+            max(1, MAX_DATA_SCALARS // self.dimensions),
+        )
+
+    @property
+    def data_split_count(self) -> int:
+        return (
+            self.data_rows + self.data_split_rows - 1
+        ) // self.data_split_rows
+
 
 WORKLOADS = (
     Workload("vk_lsvd", 19_527_601, 100_000, 64),
@@ -146,6 +166,9 @@ SUMMARY_FIELDS = [
     "full_command_wall_seconds",
     "batch_size",
     "batch_count",
+    "execution_variant",
+    "data_split_rows",
+    "data_split_count",
     "keops_version",
     "data_sha256",
     "query_sha256",
@@ -215,7 +238,7 @@ def main_goal_commit() -> str:
 
 
 def require_compatible_implementation(
-    accepted_commit: str, current_commit: str
+    accepted_commit: str, current_commit: str, workload: Workload
 ) -> None:
     if accepted_commit == current_commit:
         return
@@ -227,7 +250,7 @@ def require_compatible_implementation(
             accepted_commit,
             current_commit,
             "--",
-            *IMPLEMENTATION_PATHS,
+            *CORE_IMPLEMENTATION_PATHS,
         ],
         cwd=KEOPS_ROOT,
         check=False,
@@ -239,6 +262,35 @@ def require_compatible_implementation(
         )
     if completed.returncode != 0:
         raise RuntimeError("Could not compare the accepted KeOps implementation.")
+
+    helper_diff = subprocess.run(
+        [
+            "git",
+            "diff",
+            "--quiet",
+            accepted_commit,
+            current_commit,
+            "--",
+            "scripts/keops_exact_kde.py",
+        ],
+        cwd=KEOPS_ROOT,
+        check=False,
+    )
+    if helper_diff.returncode == 0:
+        return
+    if (
+        helper_diff.returncode == 1
+        and accepted_commit in PRE_SPLIT_ACCEPTED_COMMITS
+        and workload.data_split_count == 1
+        and sha256_file(HELPER) == SPLIT_HELPER_SHA256
+    ):
+        return
+    if helper_diff.returncode == 1:
+        raise RuntimeError(
+            "The KeOps adapter changed after an accepted workload; "
+            "that workload cannot be reused."
+        )
+    raise RuntimeError("Could not compare the accepted KeOps adapter.")
 
 
 def require_h100() -> None:
@@ -601,6 +653,8 @@ def parse_metrics(log_text: str) -> dict[str, str]:
         "query_count",
         "batch_size",
         "batch_count",
+        "data_split_rows",
+        "data_split_count",
         "keops_import_seconds",
         "pre_timer_total_seconds",
         "qps",
@@ -623,6 +677,8 @@ def validate_metrics(
         "query_count": str(workload.query_rows),
         "batch_size": str(workload.query_rows),
         "batch_count": "1",
+        "data_split_rows": str(workload.data_split_rows),
+        "data_split_count": str(workload.data_split_count),
     }
     for name, value in expected.items():
         if metrics.get(name) != value:
@@ -667,6 +723,8 @@ def make_command(
         DTYPE,
         "--timing-mode",
         TIMING_MODE,
+        "--max-data-scalars",
+        str(MAX_DATA_SCALARS),
         "--local-keops-root",
         KEOPS_ROOT,
     ]
@@ -780,7 +838,7 @@ def load_record(
     accepted_commit = record.get("git_commit")
     if not isinstance(accepted_commit, str) or not accepted_commit:
         raise RuntimeError(f"{workload.record_path} has no accepted commit.")
-    require_compatible_implementation(accepted_commit, commit)
+    require_compatible_implementation(accepted_commit, commit, workload)
     accepted_goal_commit = record.get("main_goal_commit")
     if not isinstance(accepted_goal_commit, str) or not accepted_goal_commit:
         raise RuntimeError(f"{workload.record_path} has no main goal commit.")
@@ -850,6 +908,7 @@ def write_inventory(
         handle.write(f"main_goal_commit: {goal_commit}\n")
         handle.write(f"keops_version: {version}\n")
         handle.write(f"relative_tolerance: {RELATIVE_TOLERANCE:.17g}\n")
+        handle.write(f"max_data_scalars_per_split: {MAX_DATA_SCALARS}\n")
         handle.write("absolute_tolerance: none\n")
         handle.write("zero_reference_rule: exact_zero\n")
         handle.write(f"timeout_seconds: {TIMEOUT_SECONDS}\n\n")
@@ -949,6 +1008,13 @@ def run_workload(
         "full_command_wall_seconds": f"{wall_seconds:.9f}",
         "batch_size": metrics["batch_size"],
         "batch_count": metrics["batch_count"],
+        "execution_variant": (
+            "single_reduction"
+            if workload.data_split_count == 1
+            else "data_split_reduction"
+        ),
+        "data_split_rows": metrics["data_split_rows"],
+        "data_split_count": metrics["data_split_count"],
         "keops_version": version,
         "data_sha256": checksums["data"],
         "query_sha256": checksums["query"],

@@ -238,18 +238,48 @@ def run_svm(
         weights = read_weights(args.weights, data.shape[0], data.dtype)
         weights_read_elapsed = time.perf_counter() - weights_read_start
 
+    data_split_rows = data.shape[0]
+    if args.engine == "keops" and args.max_data_scalars > 0:
+        data_split_rows = min(
+            data.shape[0],
+            max(1, args.max_data_scalars // data.shape[1]),
+        )
+    data_split_count = batch_count(data.shape[0], data_split_rows)
+
     def compute_output() -> np.ndarray:
         output = np.empty(query.shape[0], dtype=data.dtype)
         for start, end in batched_ranges(query.shape[0], args.batch_size):
-            output[start:end] = compute_sum(
-                args.engine,
-                data_scaled,
-                query[start:end],
-                weights,
-                args.backend,
-                LazyTensor,
-                args.data_batch_size,
-            )
+            if data_split_count == 1:
+                output[start:end] = compute_sum(
+                    args.engine,
+                    data_scaled,
+                    query[start:end],
+                    weights,
+                    args.backend,
+                    LazyTensor,
+                    args.data_batch_size,
+                )
+                continue
+
+            query_output = np.zeros(end - start, dtype=data.dtype)
+            for data_start, data_end in batched_ranges(
+                data.shape[0], data_split_rows
+            ):
+                split_weights = (
+                    None
+                    if weights is None
+                    else weights[data_start:data_end]
+                )
+                query_output += compute_sum(
+                    args.engine,
+                    data_scaled[data_start:data_end],
+                    query[start:end],
+                    split_weights,
+                    args.backend,
+                    LazyTensor,
+                    args.data_batch_size,
+                )
+            output[start:end] = query_output
         return output
 
     elapsed, output, warmup_policy, warmup_elapsed = timed_run(args, compute_output)
@@ -260,6 +290,8 @@ def run_svm(
         "data_scale_seconds": data_scale_elapsed,
         "query_scale_seconds": query_scale_elapsed,
         "weights_read_seconds": weights_read_elapsed,
+        "data_split_rows": data_split_rows,
+        "data_split_count": data_split_count,
     }
     return (
         elapsed,
@@ -391,6 +423,15 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         help="Only used by --engine numpy.",
     )
     parser.add_argument(
+        "--max-data-scalars",
+        type=int,
+        default=0,
+        help=(
+            "For KeOps, split the data reduction so each split contains at "
+            "most this many scalar coordinates. Zero disables splitting."
+        ),
+    )
+    parser.add_argument(
         "--local-keops-root",
         default=None,
         help="Path to cloned KeOps repo. Defaults to ../keops from this script.",
@@ -427,6 +468,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--batch-size must be positive")
     if args.data_batch_size <= 0:
         parser.error("--data-batch-size must be positive")
+    if args.max_data_scalars < 0:
+        parser.error("--max-data-scalars must be non-negative")
     if args.no_warmup:
         args.timing_mode = "cold_start"
     return args
@@ -464,8 +507,14 @@ def main() -> int:
         keops_import_elapsed
         + data_read_elapsed
         + scale_coeff_elapsed
-        + sum(prep_times.values())
+        + sum(
+            value
+            for name, value in prep_times.items()
+            if name.endswith("_seconds")
+        )
     )
+    data_split_rows = int(prep_times.get("data_split_rows", data.shape[0]))
+    data_split_count = int(prep_times.get("data_split_count", 1))
     qps = float(query_count) / elapsed if elapsed > 0 else float("inf")
     print(f"Mode: {args.mode}")
     print(f"Engine: {args.engine}")
@@ -475,6 +524,8 @@ def main() -> int:
     print(f"Query count: {query_count}")
     print(f"Batch size: {args.batch_size}")
     print(f"Batch count: {batches}")
+    print(f"Data split rows: {data_split_rows}")
+    print(f"Data split count: {data_split_count}")
     print(f"Timing mode: {args.timing_mode}")
     print(f"Warmup policy: {warmup_policy}")
     print(f"Warmup call time: {warmup_elapsed:.6f} seconds")
@@ -490,6 +541,8 @@ def main() -> int:
     print(f"query_count: {query_count}")
     print(f"batch_size: {args.batch_size}")
     print(f"batch_count: {batches}")
+    print(f"data_split_rows: {data_split_rows}")
+    print(f"data_split_count: {data_split_count}")
     print(f"keops_import_seconds: {keops_import_elapsed:.9f}")
     print(f"data_read_seconds: {data_read_elapsed:.9f}")
     print(f"scale_coeff_seconds: {scale_coeff_elapsed:.9f}")
